@@ -3,6 +3,7 @@ package main
 import (
 	"bufio"
 	"fmt"
+	"github.com/influxdata/influxdb/client/v2"
 	"io"
 	"log"
 	"net/url"
@@ -40,7 +41,7 @@ type ReadFromFile struct {
 }
 
 type WriteToInfluxDB struct {
-	influxDb string
+	influxDBDsn string
 }
 
 //TODO 写入到MongoDB
@@ -123,8 +124,47 @@ func (l *LogProcess) process() {
 
 // 写入模块->influxDB
 func (w *WriteToInfluxDB) write(wc chan *Message) {
+	configSlice := strings.Split(w.influxDBDsn, "@")
+	c, err := client.NewHTTPClient(client.HTTPConfig{
+		Addr:     configSlice[0],
+		Username: configSlice[1],
+		Password: configSlice[2],
+	})
+	if err != nil {
+		log.Printf("client.NewHTTPClient() fail,err: %v \n", err.Error())
+		return
+	}
 	for v := range wc {
-		fmt.Println(v)
+		batchPoints, err := client.NewBatchPoints(client.BatchPointsConfig{
+			Precision: configSlice[4],
+			Database:  configSlice[3],
+		})
+		if err != nil {
+			log.Printf("client.NewBatchPoints() fail,err: %v \n", err.Error())
+			return
+		}
+		tags := map[string]string{
+			"Path":   v.Path,
+			"Method": v.Method,
+			"Scheme": v.Scheme,
+			"Status": v.Status,
+		}
+		fields := map[string]interface{}{
+			"UpstreamTime": v.UpstreamTime,
+			"RequestTime":  v.RequestTime,
+			"ByteSent":     v.ByteSent,
+		}
+		newPoint, err := client.NewPoint("nginx_log", tags, fields, v.TimeLocal)
+		if err != nil {
+			log.Printf("client.NewPoint() fail,err: %v \n", err.Error())
+			return
+		}
+		batchPoints.AddPoint(newPoint)
+		if err := c.Write(batchPoints); err != nil {
+			log.Printf("c.Write fail,err: %v \n", err.Error())
+			return
+		}
+		log.Printf("write success")
 	}
 }
 
@@ -138,7 +178,7 @@ func main() {
 		path: "./file/access.log",
 	}
 	wToInfluxDB := &WriteToInfluxDB{
-		influxDb: "",
+		influxDBDsn: "http://localhost:8086@admin@123456@my_test@s",
 	}
 	//TODO 写入到MongoDB
 	//wToMongoDB := &WriteToMongoDB{mongoConfig: ""}
@@ -149,7 +189,11 @@ func main() {
 		w:  wToInfluxDB,
 	}
 	go lp.r.read(lp.rc)
-	go lp.process()
-	go lp.w.write(lp.wc)
+	for i := 0; i < 4; i++ {
+		go lp.process()
+	}
+	for i := 0; i < 4; i++ {
+		go lp.w.write(lp.wc)
+	}
 	time.Sleep(time.Second * 60)
 }
